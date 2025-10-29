@@ -62,129 +62,87 @@ async def read_root():
     return {"Hello": "Welcome to my country currency & exchange api"}
 
 @app.post("/countries/refresh", status_code=201)
-async def refresh(request: CountryRequest):
+async def refresh():
     country_url = "https://restcountries.com/v2/all?fields=name,capital,region,population,flag,currencies"
     
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(country_url)
-            response.raise_for_status()
-            countries = response.json()
-    except httpx.RequestError as exc:
-        raise HTTPException(status_code=503, detail=f"Could not fetch data from {exc.request.url!r}.") from exc
-    
-    except httpx.TimeoutException as exc:
-        raise HTTPException(status_code=504, detail=f"Request to Rest Countries timed out.") from exc
-    
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(status_code=exc.response.status_code, detail=f"Error response {exc.response.status_code} while requesting {exc.request.url!r}.") from exc
-
-
-    #check if the country is present in the api response
-    match = next(
-        (c for c in countries if c["name"].lower() == request.Country.lower()), 
-        None
-    )
-
-    if not match:
-        raise HTTPException(status_code=404, detail=f"Country not found")
-    
-
-    population = match['population']
-    currencies = match.get("currencies", [])
-    currency_code = currencies[0]["code"] if currencies else None
 
     exchange_url = "https://open.er-api.com/v6/latest/USD"
 
+    # Fetch all countries
     try:
         async with httpx.AsyncClient() as client:
-            response = await client.get(exchange_url)
-            response.raise_for_status()
-            exchange_data = response.json().get("rates")
+            country_res = await client.get(country_url)
+            country_res.raise_for_status()
+            countries = country_res.json()
 
-            exchange_match = exchange_data.get(currency_code) if exchange_data else None
-    except httpx.RequestError as exc:
-        raise HTTPException(status_code=500, detail=f"Could not fetch data from  {exc.request.url!r}.") from exc
-    
-    except httpx.TimeoutException as exc:
-        raise HTTPException(status_code=504, detail=f"Request to exchange api timed out.") from exc
-    
-    except httpx.HTTPStatusError as exc:
-        raise HTTPException(status_code=exc.response.status_code, detail=f"Error response {exc.response.status_code} while requesting {exc.request.url!r}.") from exc
-    if not exchange_match:
-        raise HTTPException(status_code=404, detail=f"Exchange rate for currency '{currency_code}' not found")
-    if not currency_code:
-        currency_code = "null"
-        exchange_match = None
-        estimated_gdp = 0
-
-    else:
-        estimated_gdp = population * random.uniform(1000, 2000) / exchange_match
-
-    name = match["name"]
-    capital = match["capital"]
-    region = match["region"]
-    population = match["population"]
-    currency_code = currency_code
-    exchange_rate = exchange_match
-    flag = match["flag"]
-    estimated_gdp = estimated_gdp
-    timestamp = datetime.utcnow()
-    
+            exchange_res = await client.get(exchange_url)
+            exchange_res.raise_for_status()
+            exchange_data = exchange_res.json().get("rates", {})
+    except httpx.RequestError:
+        raise HTTPException(status_code=503, detail={"error": "External data source unavailable", "details": "Could not fetch data from one or both APIs."})
 
     db: Session = SessionLocal()
-    try:
-        # try to find existing row by name
-        existing = db.query(Country).filter(Country.name == name).first()
+    total_countries = 0
+    timestamp = datetime.utcnow()
 
-        if existing:
-            # update fields
-            existing.capital = capital
-            existing.region = region
-            existing.population = population
-            existing.currency_code = currency_code
-            existing.exchange_rate = exchange_rate
-            existing.flag = flag
-            existing.estimated_gdp = estimated_gdp
-            existing.last_refreshed_at = timestamp
-            db.add(existing)
-            updated = True
-        else:
-            # create new record
-            new_country = Country(
-                name=name,
-                capital=capital,
-                region=region,
-                population=population,
-                currency_code=currency_code,
-                exchange_rate=exchange_rate,
-                flag=flag,
-                estimated_gdp=estimated_gdp,
-                last_refreshed_at= timestamp
-            )
-            db.add(new_country)
-            updated = False
+    try:
+        for c in countries:
+            name = c.get("name")
+            capital = c.get("capital")
+            region = c.get("region")
+            population = c.get("population")
+            flag = c.get("flag")
+            currencies = c.get("currencies", [])
+
+            currency_code = currencies[0]["code"] if currencies else None
+            exchange_rate = exchange_data.get(currency_code) if currency_code else None
+
+            # GDP Calculation
+            if not currency_code or not exchange_rate:
+                estimated_gdp = 0
+            else:
+                estimated_gdp = population * random.uniform(1000, 2000) / exchange_rate
+
+            # Update or Insert
+            existing = db.query(Country).filter(Country.name.ilike(name)).first()
+            if existing:
+                existing.capital = capital
+                existing.region = region
+                existing.population = population
+                existing.currency_code = currency_code
+                existing.exchange_rate = exchange_rate
+                existing.flag = flag
+                existing.estimated_gdp = estimated_gdp
+                existing.last_refreshed_at = timestamp
+            else:
+                new_country = Country(
+                    name=name,
+                    capital=capital,
+                    region=region,
+                    population=population,
+                    currency_code=currency_code,
+                    exchange_rate=exchange_rate,
+                    flag=flag,
+                    estimated_gdp=estimated_gdp,
+                    last_refreshed_at=timestamp,
+                )
+                db.add(new_country)
+
+            total_countries += 1
 
         db.commit()
         generate_summary_image()
-
-    
-    except IntegrityError:
+    except Exception as e:
         db.rollback()
-        raise HTTPException(status_code=500, detail="Database integrity error")
+        raise HTTPException(status_code=500, detail=str(e))
     finally:
         db.close()
 
-
-    #return saved record summary
     return {
-        "message": "cached",
-        "name": name,
-        "currency_code": currency_code,
-        "updated": updated,
-        "last_refreshed_at": timestamp.isoformat()
+        "message": "Countries refreshed successfully",
+        "total_countries": total_countries,
+        "last_refreshed_at": timestamp.isoformat(),
     }
-
 
 '''
     return {
