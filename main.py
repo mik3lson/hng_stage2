@@ -315,7 +315,7 @@ def get_status():
     }
 
 
-@app.get("/country/image")
+@app.get("/countries/image")
 def get_country_image():
     # Use absolute path to avoid relative path confusion
     image_path = Path(__file__).parent / "cache" / "summary.png"
